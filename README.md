@@ -1,0 +1,1 @@
+# alfresco-search-services-inspector-script
