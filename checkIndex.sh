@@ -30,7 +30,6 @@ DBSID=PDB1
 
 # SOLR Config
 SOLRURL=http://localhost:8083/solr
-SOLRSECRET=secret
 BATCH_REQUEST_NUM=100
 
 # SOLR SSL Config, uncomment only if you want to enable
@@ -46,7 +45,7 @@ BATCH_REQUEST_NUM=100
 
 #Folder that will contain the exported and digested files that support the script
 BASEFOLDER=index_check
-
+SOLRSECRET=secret
 DEFAULT_FROM_VALUE=0
 DEFAULT_QUERY_STRATEGY="node-id"
 
@@ -652,6 +651,7 @@ then
 else
   echo "Configuration file not found: $CONFIG_FILE. Using default configuration"
 fi
+SOLRHEADERS="-H X-Alfresco-Search-Secret:$SOLRSECRET"
 
 CSV_FILE=$BASEFOLDER/$CSV_FILENAME
 SSL_CONFIG=
