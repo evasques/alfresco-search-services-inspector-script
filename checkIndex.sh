@@ -428,7 +428,7 @@ checkItem()
             # If the number of results is not the number expected, see which items are missing and write them to the missing-% file
             if [ "$numFound" -ne "$count" ]; then
                 echo "$response" | jq '.response.docs' | jq ".[].$queryParam" | while read -r item; do 
-                    grep -v $item $BASEFOLDER/checking-$type > tmpfile && mv tmpfile $BASEFOLDER/checking-$type
+                    grep -vw $item $BASEFOLDER/checking-$type > tmpfile && mv tmpfile $BASEFOLDER/checking-$type
                 done
                 cat $BASEFOLDER/checking-$type >> $BASEFOLDER/missing-$type
             fi
@@ -463,7 +463,7 @@ checkItem()
         }
         if [ "$numFound" -ne "$count" ]; then
             echo "$response" | jq '.response.docs' | jq ".[].$queryParam" | while read -r item; do 
-                grep -v $item $BASEFOLDER/checking-$type > tmpfile && mv tmpfile $BASEFOLDER/checking-$type
+                grep -vw $item $BASEFOLDER/checking-$type > tmpfile && mv tmpfile $BASEFOLDER/checking-$type
             done
             cat $BASEFOLDER/checking-$type >> $BASEFOLDER/missing-$type
         fi
