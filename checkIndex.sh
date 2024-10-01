@@ -2,56 +2,17 @@
 # 2022 Author Eva Vasques
 set -e
 
-#Configure database before running the script if you want the script to run the query
-
-# Postgres
-#DBMS=pg
-#DBUSER=alfresco
-#DBPASS=alfresco
-#DBHOST=localhost
-#DBPORT=5432
-
-# Oracle
-DBMS=ora
-DBUSER=alfresco
-DBPASS=alfresco
-DBHOST=localhost
-DBPORT=1521
-DBSID=PDB1
-
-# mySQL
-#DBMS=mysql
-#DBNAME=alfresco
-#DBUSER=alfresco
-#DBPASS=alfresco
-#DBHOST=localhost
-#DBPORT=3306
-
-
-# SOLR Config
-SOLRURL=http://localhost:8083/solr
-BATCH_REQUEST_NUM=100
-
-# SOLR SSL Config, uncomment only if you want to enable
-#SSL_ENABLED="true"
-#SSL_CERT=/Users/evasques/workspaces/alfresco/mnts/23303/ca.cert.pem
-#SSL_CERT_PASSWORD="password"
-#SSL_KEY=/Users/evasques/workspaces/alfresco/mnts/23303/ca.key.pem
-
-# SOLR SHARDING CONFIG, uncomment only if you want to enable
-# Set SHARD as any one of the shards that lives in SOLRURL (doesn't impact the results which one you choose)
-#SHARD=eva-0
-#SHARDLIST="http://solr6:8983/solr/eva-0,http://solr6:8983/solr/eva-1,http://solr6:8983/solr/eva-2"
-
-#Folder that will contain the exported and digested files that support the script
+# Default values
 BASEFOLDER=index_check
+DBMS=pg
+DBPORT=5432
+SOLRURL=http://localhost:8083/solr
 SOLRSECRET=secret
+BATCH_REQUEST_NUM=100
+BATCH_ERROR_NODES_NUM=1000
 DEFAULT_FROM_VALUE=0
 DEFAULT_QUERY_STRATEGY="node-id"
-
-#Default CSV file that will either be generated or needs to be provided. Can also be overriten as argument on --check
-CSV_FILE_NAME=output.csv
-
+CSV_FILENAME=output.csv
 
 displayHelp()
 {
@@ -74,6 +35,8 @@ How to run: \n \
  --max | -m : limit the number of results - default no limit \n \
  --check | -c : Will cross check the DB data from the default CSV or from the one provided as argument with the SOLR index \n \
         Outputs to screen the number of missing items in index and you can find the full list of missing items inside folder $BASEFOLDER \n \
+ --check-errors-only : Will only gather the error nodes reported in SOLR. Does not need any prior actions and only requires \n \
+        a connection to SOLR. You can then (or simultaneosly)  use the --fix command to reindex these nodes \n \
  --csv : Path to the CSV file you want to use to perform the cross check instead of using --query \n \
  --fix : Reindexes the missing items. Requires that the check was ran previously and it relies on the files in $BASEFOLDER to request a reindex for each item \n\n \
 Example: \n \
@@ -103,8 +66,8 @@ query()
     fi
 
     #Convert variables to uppercase for string comparison
-    DBMS=$(echo $DBMS | tr 'a-z' 'A-Z')
-    QUERY_STRATEGY=$(echo $QUERY_STRATEGY | tr 'a-z' 'A-Z')
+    DBMS=$(echo $DBMS | tr '[:lower:]' '[:upper:]')
+    QUERY_STRATEGY=$(echo "$QUERY_STRATEGY" | tr '[:lower:]' '[:upper:]')
 
     echo "Using DBMS $DBMS with query strategy $QUERY_STRATEGY"
     if [ "$DBMS" = "PG" ]; then
@@ -129,7 +92,7 @@ check()
 {   
     SECONDS=0
     # Validate we have a valid CSV File
-    if ! [ -z "$1" ]; then
+    if [ -n "$1" ]; then
         CSV_FILE=$1
     fi
 
@@ -152,8 +115,91 @@ check()
     checkACLs
     checkItem "txns" "TXID" "Tx" "&fl=[cached]*"
     checkItem "acltxids" "ACLTXID" "AclTx" "&fl=[cached]*"
+    checkErrorNodes
+    crossCheckErrorNodes
     sucessMsg "Elapsed Time performing index check: $SECONDS seconds"
     sucessMsg "You can validate the missing items in $BASEFOLDER folder in the files named missing-%"
+}
+
+# Queries SOLR for the error nodes and exports them to a file
+checkErrorNodes()
+{
+    echo "Checking for error nodes..."
+
+    ERROR_NODES_FILE=$BASEFOLDER/missing-error-nodes
+
+    clearFile $ERROR_NODES_FILE
+
+    COUNT_ERROR_NODES=0
+    FOUND_ERROR_NODES=0
+    START_ROWS=0
+
+    while true
+    do
+        response=$(batchRequestErrorNodes $START_ROWS)
+
+        validateResponse $response
+
+        FOUND_ERROR_NODES=$(echo $response | jq '.response.numFound' )
+        REQ_ERROR_NODES=$(echo $response | jq -r '.response.docs | length' )
+        COUNT_ERROR_NODES=$((COUNT_ERROR_NODES+REQ_ERROR_NODES))
+
+        echo $response | jq '.response.docs[].DBID' >> $ERROR_NODES_FILE
+
+        if [ "$COUNT_ERROR_NODES" -ge "$FOUND_ERROR_NODES" ]; then
+            break
+        fi
+
+        reportProgress $COUNT_ERROR_NODES $FOUND_ERROR_NODES "error nodes"
+
+        START_ROWS=$((START_ROWS+BATCH_ERROR_NODES_NUM))
+    done
+
+    echo " - Total Error Nodes in index: $COUNT_ERROR_NODES"
+}
+
+validateResponse()
+{
+    test=$(echo $1 | jq '.response' )
+
+    if [ -z "$test" ]
+    then
+        errorMsg "Unexpected SOLR response: \n \
+        $response
+        "
+        exit 1
+    fi
+}
+
+batchRequestErrorNodes()
+{
+    START=$1
+    {
+        response=$(curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' "$SOLRURL/$SHARD/select?q=DOC_TYPE:%22ErrorNode%22&wt=json&rows=$BATCH_ERROR_NODES_NUM&start=$START$APPEND_SHARD")
+    } ||
+    {
+        errorMsg "Cannot communicate with SOLR on $SOLRURL/$SHARD. Request: \n \
+            curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' \"$SOLRURL/$SHARD/select?q=DOC_TYPE:%22ErrorNode%22&wt=json&rows=$BATCH_ERROR_NODES_NUM&start=$START$APPEND_SHARD\"
+        "
+        exit 1
+    }
+
+    echo $response
+}
+
+crossCheckErrorNodes()
+{
+    echo "Cross checking error nodes with missing nodes..."
+    grep -xvFf $BASEFOLDER/missing-nodes $BASEFOLDER/missing-error-nodes | while read -r node; do
+        echo $node >> $BASEFOLDER/missing-nodes
+    done
+    total_nodes_to_reindex=$(cat $BASEFOLDER/missing-nodes | wc -l)
+    echo " - Total nodes that need reindex: $total_nodes_to_reindex"
+}
+
+prepStandaloneErrorCheck()
+{
+    clearFile $BASEFOLDER/missing-nodes
 }
 
 # Fixes the missing indexes by performing a reindex (based on the files created from --check)
@@ -244,9 +290,6 @@ setupQuery()
     #Can be false or zero depending on the DBMS
     boolean_value=$1
 
-    #Create the base Folder
-    mkdir -p $BASEFOLDER
-
     if ! [[ $FROM_VALUE =~ $INT_REGEX ]] ; then
         FROM_VALUE=$DEFAULT_FROM_VALUE
     fi
@@ -262,7 +305,7 @@ setupQuery()
     APPEND_END_VALUE=
     APPEND_LIMIT=
 
-    if ! [ -z "$MAX_VALUES" ]; then
+    if [ -n "$MAX_VALUES" ]; then
         if [ "$DBMS" = "MYSQL" ]; then
             APPEND_LIMIT="LIMIT $MAX_VALUES"
         else
@@ -272,7 +315,7 @@ setupQuery()
 
     if [ "$QUERY_STRATEGY" = "NODE-ID" ]; then
  
-        if ! [ -z "$TO_VALUE" ]; then
+        if [ -n "$TO_VALUE" ]; then
             APPEND_END_VALUE=" AND n.id <= $TO_VALUE"
         fi
 
@@ -288,7 +331,7 @@ order by n.id \
 $APPEND_LIMIT;"
     elif [ "$QUERY_STRATEGY" = "TRANSACTION-ID" ]; then
 
-        if ! [ -z "$TO_VALUE" ]; then
+        if [ -n "$TO_VALUE" ]; then
             APPEND_END_VALUE=" AND transaction_id <= $TO_VALUE"
         fi
 
@@ -304,7 +347,7 @@ order by n.id \
 $APPEND_LIMIT;"
     elif [ "$QUERY_STRATEGY" = "TRANSACTION-COMMITTIMEMS" ]; then
         
-        if ! [ -z "$TO_VALUE" ]; then
+        if [ -n "$TO_VALUE" ]; then
             APPEND_END_VALUE=" AND t.commit_time_ms <= $TO_VALUE"
         fi
 
@@ -333,11 +376,11 @@ $APPEND_LIMIT;"
 # Creates one file per item: nodes, acls, txns, acltxids with unique values
 prep()
 {
-    > $BASEFOLDER/nodes
-    > $BASEFOLDER/acls
-    > $BASEFOLDER/aclunique
-    > $BASEFOLDER/txns
-    > $BASEFOLDER/acltxids
+    clearFile $BASEFOLDER/nodes
+    clearFile $BASEFOLDER/acls
+    clearFile $BASEFOLDER/aclunique
+    clearFile $BASEFOLDER/txns
+    clearFile $BASEFOLDER/acltxids
     
     # nodes - Only 1st column
     cat $CSV_FILE | cut -f1,1 -d',' > $BASEFOLDER/nodes
@@ -381,13 +424,11 @@ checkItem()
     queryDocType=$3
     queryAppend=$4
 
-    rm -f $BASEFOLDER/missing-$type
-    touch $BASEFOLDER/missing-$type
+    clearFile $BASEFOLDER/missing-$type
+
     count=0
     query=""
-    items=""
     supercount=0
-    PROGRESS=0
     TOTAL_ITEMS=$(cat $BASEFOLDER/$type | wc -l )
     while IFS=, read -r itemid
     do
@@ -482,8 +523,8 @@ checkACLs()
     #This will give ys the list of acls missing
     checkItem "aclunique" "ACLID" "Acl" "&fl=[cached]*"
 
-    rm -f $BASEFOLDER/missing-acls
-    touch $BASEFOLDER/missing-acls
+    clearFile $BASEFOLDER/missing-acls
+
     while IFS=, read -r aclid
     do
         grep "^$aclid" $BASEFOLDER/acls >> $BASEFOLDER/missing-acls
@@ -502,13 +543,13 @@ fixItem()
     item=$1 
     reindex_param_name=$2 
 
-    PROGRESS=0
-    TOTAL_ITEMS=$(cat $BASEFOLDER/missing-$item | wc -l )
-    
     if [[ ! -f $BASEFOLDER/missing-$item ]]; then
-        echo "Expected file $BASEFOLDER/missing-$item not found. Skipping reindex for $item"
+        echo "Skipping reindex for $item"
         return
     fi
+
+    TOTAL_ITEMS=$(cat $BASEFOLDER/missing-$item | wc -l )
+
     count=0
     echo "Missing $item in index: $(cat $BASEFOLDER/missing-$item | wc -l)"
     while IFS=, read -r itemValue
@@ -532,13 +573,13 @@ fixItem()
 # Aux function. Reindex acls that are on file $BASEFOLDER/missing-acls
 fixACLs()
 {
-    PROGRESS=0
-    TOTAL_ITEMS=$(cat $BASEFOLDER/missing-$item | wc -l )
-
     if [[ ! -f $BASEFOLDER/missing-acls ]]; then
-        echo "Expected file $BASEFOLDER/missing-acls not found. Skipping node index reindex"
+        echo "Skipping reindex for acls"
         return
     fi
+
+    TOTAL_ITEMS=$(cat $BASEFOLDER/missing-$item | wc -l )
+
     count=0
     echo "Missing acls in index: $(cat $BASEFOLDER/missing-acls | wc -l)"
     while IFS=, read -r aclid txid acltxid
@@ -589,9 +630,19 @@ sucessMsg()
    echo "\033[1;32m$1\033[0m"
 }
 
+clearFile()
+{
+    file=$1
+    if [ -f $file ]; then
+        rm $file
+    fi
+    touch $file
+}
+
 INT_REGEX='^[0-9]+$'
 RUN_QUERY=0
 RUN_CHECK=0
+RUN_ERROR_CHECK=0
 RUN_FIX=0
 CSV_FILE_ARG=
 
@@ -600,9 +651,9 @@ FROM_VALUE=
 TO_VALUE=
 MAX_VALUES=
 QUERY_STRATEGY=
-CONFIG_FILE=".config"
+DEFAULT_CONFIG_FILE=".config"
 
-while [ ! -z "$1" ]; do
+while [ -n "$1" ]; do
     case "$1" in
         --config)
             shift
@@ -630,6 +681,9 @@ while [ ! -z "$1" ]; do
         --check|-c)
             RUN_CHECK=1
             ;;
+        --check-errors-only)
+            RUN_ERROR_CHECK=1
+            ;;
         --csv)
             shift 
             CSV_FILE_ARG=$1
@@ -644,12 +698,13 @@ while [ ! -z "$1" ]; do
 shift
 done
 
-if [ -f $CONFIG_FILE ]
+if [ -f $CONFIG_FILE ] && [ -n "$CONFIG_FILE" ]
 then
-  echo "Using congifuration file $CONFIG_FILE"
-  export $(cat $CONFIG_FILE | sed 's/#.*//g' | xargs)
+    echo "Using congifuration file $CONFIG_FILE"
+    export $(cat $CONFIG_FILE | sed 's/#.*//g' | xargs)
 else
-  echo "Configuration file not found: $CONFIG_FILE. Using default configuration"
+    echo "Using default configuration file $DEFAULT_CONFIG_FILE"
+    export $(cat $DEFAULT_CONFIG_FILE | sed 's/#.*//g' | xargs)
 fi
 SOLRHEADERS="-H X-Alfresco-Search-Secret:$SOLRSECRET"
 
@@ -661,12 +716,15 @@ if [ "$SSL_ENABLED" = "true" ]; then
 fi
 
 APPEND_SHARD=
-if ! [ -z "$SHARD" ]; then
+if [ -n "$SHARD" ]; then
      echo "Sharding Configuration enabled"
     APPEND_SHARD="&shards=$SHARDLIST"
 else
     SHARD=alfresco
 fi
+
+#Create the base Folder if it does not exist
+mkdir -p $BASEFOLDER
 
 if [ "$RUN_QUERY" -eq 1 ]; then
     query
@@ -674,6 +732,12 @@ fi
 
 if [ "$RUN_CHECK" -eq 1 ]; then
     check $CSV_FILE_ARG
+fi
+
+if [ "$RUN_ERROR_CHECK" -eq 1 ]; then
+    prepStandaloneErrorCheck
+    checkErrorNodes
+    crossCheckErrorNodes
 fi
 
 if [ "$RUN_QUERY" -eq 1 ] && [ "$RUN_CHECK" = 0 ] && [ "$RUN_FIX" = 1 ]; then 
@@ -685,10 +749,8 @@ if [ "$RUN_FIX" -eq 1 ]; then
     fix
 fi
 
-if [ "$RUN_QUERY" -eq 0 ] && [ "$RUN_CHECK" = 0 ] && [ "$RUN_FIX" = 0 ]; then 
+if [ "$RUN_QUERY" -eq 0 ] && [ "$RUN_CHECK" = 0 ] && [ "$RUN_FIX" = 0 ] && [ "$RUN_ERROR_CHECK" = 0 ]; then
     displayHelp
 fi
-
-
 
 set +e
