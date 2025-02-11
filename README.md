@@ -56,7 +56,9 @@ Only uncomment/include these configs if you have sharding
 | Variable | Example | Description |
 | ----------- | ----------- | ----------- |
 | SHARD | SHARD=shard-0 | Set SHARD as any one of the shards that lives in SOLRURL (doesn't impact the results which one you choose)|
-| SHARDLIST | SHARDLIST="<http://solr6:8983/solr/shard-0,http://solr6:8983/solr/shard-1,http://solr6:8983/solr/shard-2>" | A list of all shards we need to query|
+| SHARDLIST | SHARDLIST="<http://solr6:8983/solr/shard-0,http://solr6:8983/solr/shard-1,http://solr6:8983/solr/shard-2>" | A list of all shards we need to query - the URIs that SOLR is able to use to query the other shards/instances|
+| SOLR_INSTANCE_LIST | SHARDLIST="<http://localhost:8983/solr,http://localhost:8984/solr>" | A list of all instances we need to fix - the URIs that the script will call to fix|
+| PARALLEL_FIX | PARALLEL_FIX=true | Will issue the reindex to each instance in parallel, as a background process for each instance|
 
 ### Other configurations
 
@@ -66,6 +68,8 @@ Only uncomment/include these configs if you have sharding
 | DEFAULT_FROM_VALUE | DEFAULT_FROM_VALUE=0 | When no --from is provided, this is the default value we will query from|
 | DEFAULT_QUERY_STRATEGY | DEFAULT_QUERY_STRATEGY="node-id" | Default query strategy when no other is provided. Possible query strategies are: node-id (query by node DB ID), transaction-id (query by transaction ID) and transaction-committimems (query by the transaction commit time in milliseconds)|
 | CSV_FILE_NAME | CSV_FILE_NAME=output.csv | Default query strategy when no other is provided. Possible query strategies are: node-id (query by node DB ID), transaction-id (query by transaction ID) and transaction-committimems (query by the transaction commit time in milliseconds)|
+| REINDEX_RELATED_TXNS | REINDEX_RELATED=true | Option to also reindex the transactions related to the missing nodes|
+
 
 ## Usage
 

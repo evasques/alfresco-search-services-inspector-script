@@ -13,6 +13,8 @@ BATCH_ERROR_NODES_NUM=1000
 DEFAULT_FROM_VALUE=0
 DEFAULT_QUERY_STRATEGY="node-id"
 CSV_FILENAME=output.csv
+REINDEX_RELATED_TXNS=false
+PARALLEL_FIX=false
 
 displayHelp()
 {
@@ -121,7 +123,7 @@ check()
         crossCheckErrorNodes
     fi
 
-    sucessMsg "Elapsed Time performing index check: $SECONDS seconds"
+    sucessMsg 'Elapsed Time performing index check:' $SECONDS 'seconds'
     sucessMsg "You can validate the missing items in $BASEFOLDER folder in the files named missing-%"
 }
 
@@ -129,43 +131,30 @@ check()
 checkErrorNodes()
 {
     echo "Checking for error nodes..."
-
     ERROR_NODES_FILE=$BASEFOLDER/missing-error-nodes
-
     clearFile $ERROR_NODES_FILE
-
     COUNT_ERROR_NODES=0
     FOUND_ERROR_NODES=0
     START_ROWS=0
-
     while true
     do
         response=$(batchRequestErrorNodes $START_ROWS)
-
         validateResponse "$response"
-
         FOUND_ERROR_NODES=$(echo "$response" | jq '.response.numFound' )
         REQ_ERROR_NODES=$(echo "$response" | jq -r '.response.docs | length' )
         COUNT_ERROR_NODES=$((COUNT_ERROR_NODES+REQ_ERROR_NODES))
-
         echo "$response" | jq '.response.docs[].DBID' >> $ERROR_NODES_FILE
-
         if [ "$COUNT_ERROR_NODES" -ge "$FOUND_ERROR_NODES" ]; then
             break
         fi
-
         reportProgress $COUNT_ERROR_NODES $FOUND_ERROR_NODES "error nodes"
-
         START_ROWS=$((START_ROWS+BATCH_ERROR_NODES_NUM))
     done
-
     echo " - Total Error Nodes in index: $COUNT_ERROR_NODES"
 }
-
 validateResponse()
 {
     test=$(echo "$1" | jq '.response' )
-
     if [ -z "$test" ]
     then
         errorMsg "Unexpected SOLR response: \n \
@@ -206,12 +195,41 @@ prepStandaloneErrorCheck()
     clearFile $BASEFOLDER/missing-nodes
 }
 
+parallelFix()
+{
+    touch $BASEFOLDER/parallel-fix.log
+    clearFile $BASEFOLDER/parallel-fix.log
+
+    if [ -n "$SHARDLIST" ] && [ -n "$SOLR_INSTANCE_LIST" ]; then
+        echo "Will reindex all missing items in the shards: $SOLR_INSTANCE_LIST"
+        IFS=',' read -ra SHARDHOSTLIST <<< "$SOLR_INSTANCE_LIST"
+    else
+        SHARDHOSTLIST=("$SOLRURL")
+    fi
+
+    for SHARDINSTANCE in "${SHARDHOSTLIST[@]}"
+    do
+        echo "Background Schedule reindex in instance: $SHARDINSTANCE"
+        fix "$SHARDINSTANCE" > $BASEFOLDER/parallel-fix.log 2>&1 &
+    done
+
+    echo "Waiting for all shards to finish reindexing... Logs are being written to $BASEFOLDER/parallel-fix.log"
+}
+
 # Fixes the missing indexes by performing a reindex (based on the files created from --check)
 fix()
 {
+    if [ "$REINDEX_RELATED_TXNS" == "true" ]; then
+        addRelatedItems
+    fi
+
+    SHARD_PARAM=$1
+
     if [ -n "$SHARDLIST" ] && [ -n "$SOLR_INSTANCE_LIST" ]; then
         echo "Shard list is defined. Will reindex all missing items in the shards: $SOLR_INSTANCE_LIST"
         IFS=',' read -ra SHARDHOSTLIST <<< "$SOLR_INSTANCE_LIST"
+    elif [ -n "$SHARD_PARAM" ]; then
+        SHARDHOSTLIST=("$SHARD_PARAM")
     else
         SHARDHOSTLIST=("$SOLRURL")
     fi
@@ -227,8 +245,6 @@ fix()
         fixItem "acltxids" "acltxid" "$SHARDINSTANCE"
         sucessMsg "Elapsed Time requesting reindex in instance $SHARDINSTANCE: $SECONDS seconds"
     done
-
-    
 }
 
 # Gather nodes from postgres database
@@ -642,6 +658,26 @@ reindexItem()
     echo $status
 }
 
+addRelatedItems()
+{
+    echo "Adding related transactions to the reindex list"
+    grep -Ff $BASEFOLDER/missing-nodes $CSV_FILE | while read -r line; do
+        addToMissing "$line" 3 $BASEFOLDER/missing-txns
+    done
+}
+
+addToMissing() {
+    record=$1
+    column_number=$2
+    target_file=$3
+
+    value=$(echo "$record" | awk -v col="$column_number" -F, '{print $col}')
+
+    if ! grep -q "^$value$" "$target_file"; then
+        echo "$value" >> "$target_file"
+    fi
+}
+
 errorMsg()
 {
    echo "\033[1;31m [ERROR] $1 \033[0m"
@@ -763,8 +799,14 @@ if [ "$RUN_ERROR_CHECK" -eq 1 ] && [ "$RUN_CHECK" = 0 ]; then
 fi
 
 if [ "$RUN_FIX" -eq 1 ]; then
-    fix
+    if [ "$PARALLEL_FIX" == "true" ]; then
+        parallelFix
+    else
+        fix
+    fi
 fi
+
+
 
 if [ "$RUN_QUERY" -eq 0 ] && [ "$RUN_CHECK" = 0 ] && [ "$RUN_FIX" = 0 ] && [ "$RUN_ERROR_CHECK" = 0 ]; then
     displayHelp
