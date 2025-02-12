@@ -84,7 +84,7 @@ How to run:
 | --to or -t | final value to execute the query to - default is none|
 | --max or -m | limit the number of results - default no limit|
 | --check or -c | Will cross check the DB data from the default CSV or from the one provided as argument with the SOLR index. Outputs to screen the number of missing items in index and you can find the full list of missing items inside folder $BASEFOLDER. Will also do a check in SOLR for the error nodes and add them to the missing-nodes when not already there|
-| --check-errors-only | Will only gather the error nodes reported in SOLR. Does not need any prior actions and only requires a connection to SOLR. You can then (or simultaneosly)  use the --fix command to reindex these nodes|
+| --check-errors | Will gather the error nodes reported in SOLR. Can be used along with --check. Does not need any prior actions and only requires a connection to SOLR. You can then (or simultaneosly) use the --fix command to reindex these nodes|
 | --csv | Path to the CSV file you want to use to perform the cross check instead of using --query|
 | --fix | Reindexes the missing items. Requires that the check was ran previously and it relies on the files in $BASEFOLDER to request a reindex for each item|
 
