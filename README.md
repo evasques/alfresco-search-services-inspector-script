@@ -70,6 +70,7 @@ Only uncomment/include these configs if you have sharding
 | DEFAULT_QUERY_STRATEGY | DEFAULT_QUERY_STRATEGY="node-id" | Default query strategy when no other is provided. Possible query strategies are: node-id (query by node DB ID), transaction-id (query by transaction ID) and transaction-committimems (query by the transaction commit time in milliseconds)|
 | CSV_FILE_NAME | CSV_FILE_NAME=output.csv | Default query strategy when no other is provided. Possible query strategies are: node-id (query by node DB ID), transaction-id (query by transaction ID) and transaction-committimems (query by the transaction commit time in milliseconds)|
 | REINDEX_RELATED_TXNS | REINDEX_RELATED=true | Option to also reindex the transactions related to the missing nodes|
+| TX_REINDEX_ENABLED | TX_REINDEX_ENABLED=true | Option to enable/disable reindexing missing transactions and changesets|
 
 
 ## Usage

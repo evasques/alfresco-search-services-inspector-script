@@ -16,6 +16,7 @@ DEFAULT_QUERY_STRATEGY="node-id"
 CSV_FILENAME=output.csv
 REINDEX_RELATED_TXNS=false
 PARALLEL_FIX=false
+TX_REINDEX_ENABLED=true
 
 displayHelp()
 {
@@ -327,9 +328,14 @@ fix()
         SECONDS=0
         fixItem "nodes" "nodeid" "$SHARDINSTANCE"
         fixACLs "$SHARDINSTANCE"
-        fixItem "txns" "txid" "$SHARDINSTANCE"
-        fixItem "acltxids" "acltxid" "$SHARDINSTANCE"
-        purgeNodes "$SHARDINSTANCE"
+
+        if [ "$TX_REINDEX_ENABLED" == "true" ]; then
+            fixItem "txns" "txid" "$SHARDINSTANCE"
+            fixItem "acltxids" "acltxid" "$SHARDINSTANCE"
+        fi
+        if [ "$QUERY_STRATEGY" == "ANCESTOR-ID" ]; then
+            purgeNodes "$SHARDINSTANCE"
+        fi
         sucessMsg "Elapsed Time requesting reindex in instance $SHARDINSTANCE: $SECONDS seconds"
     done
 }
@@ -971,8 +977,6 @@ if [ "$RUN_FIX" -eq 1 ]; then
         fix
     fi
 fi
-
-
 
 if [ "$RUN_QUERY" -eq 0 ] && [ "$RUN_CHECK" = 0 ] && [ "$RUN_FIX" = 0 ] && [ "$RUN_ERROR_CHECK" = 0 ]; then
     displayHelp
