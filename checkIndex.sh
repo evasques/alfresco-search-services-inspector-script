@@ -13,6 +13,8 @@ BATCH_QUERY_NODES_NUM=1000
 DEFAULT_FROM_VALUE=0
 DEFAULT_QUERY_STRATEGY="node-id"
 CSV_FILENAME=output.csv
+REINDEX_RELATED_TXNS=false
+PARALLEL_FIX=false
 
 displayHelp()
 {
@@ -36,7 +38,7 @@ How to run: \n \
  --max | -m : limit the number of results - default no limit \n \
  --check | -c : Will cross check the DB data from the default CSV or from the one provided as argument with the SOLR index \n \
         Outputs to screen the number of missing items in index and you can find the full list of missing items inside folder $BASEFOLDER \n \
- --check-errors-only : Will only gather the error nodes reported in SOLR. Does not need any prior actions and only requires \n \
+ --check-errors : Will only gather the error nodes reported in SOLR. Does not need any prior actions and only requires \n \
         a connection to SOLR. You can then (or simultaneosly)  use the --fix command to reindex these nodes \n \
  --csv : Path to the CSV file you want to use to perform the cross check instead of using --query \n \
  --fix : Reindexes the missing items. Requires that the check was ran previously and it relies on the files in $BASEFOLDER to request a reindex for each item \n\n \
@@ -116,15 +118,17 @@ check()
     checkACLs
     checkItem "txns" "TXID" "Tx" "&fl=[cached]*"
     checkItem "acltxids" "ACLTXID" "AclTx" "&fl=[cached]*"
-    checkErrorNodes
-    crossCheckErrorNodes
 
     if [ "$QUERY_STRATEGY" == "ANCESTOR-ID" ]; then
         checkPathNodes
         crossCheckPathNodes
     fi
 
-    sucessMsg "Elapsed Time performing index check: $SECONDS seconds"
+    if [ "$RUN_ERROR_CHECK" -eq 1 ]; then
+        checkErrorNodes
+        crossCheckErrorNodes
+    fi
+    sucessMsg 'Elapsed Time performing index check:' $SECONDS 'seconds'
     sucessMsg "You can validate the missing items in $BASEFOLDER folder in the files named missing-%"
 }
 
@@ -132,36 +136,25 @@ check()
 checkErrorNodes()
 {
     echo "Checking for error nodes..."
-
     ERROR_NODES_FILE=$BASEFOLDER/missing-error-nodes
-
     clearFile $ERROR_NODES_FILE
-
     COUNT_ERROR_NODES=0
     FOUND_ERROR_NODES=0
     START_ROWS=0
-
     while true
     do
         response=$(batchRequestErrorNodes $START_ROWS)
-
         validateResponse "$response"
-
         FOUND_ERROR_NODES=$(echo "$response" | jq '.response.numFound' )
         REQ_ERROR_NODES=$(echo "$response" | jq -r '.response.docs | length' )
         COUNT_ERROR_NODES=$((COUNT_ERROR_NODES+REQ_ERROR_NODES))
-
         echo "$response" | jq '.response.docs[].DBID' >> $ERROR_NODES_FILE
-
         if [ "$COUNT_ERROR_NODES" -ge "$FOUND_ERROR_NODES" ]; then
             break
         fi
-
         reportProgress $COUNT_ERROR_NODES $FOUND_ERROR_NODES "error nodes"
-
-        START_ROWS=$((START_ROWS+BATCH_QUERY_NODES_NUM))
+        START_ROWS=$((START_ROWS+BATCH_ERROR_NODES_NUM))
     done
-
     echo " - Total Error Nodes in index: $COUNT_ERROR_NODES"
 }
 
@@ -222,11 +215,11 @@ batchRequestErrorNodes()
     
     START=$1
     {
-        response=$(curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' "$SOLRURL/$SHARD/afts?indent=on&rows=$BATCH_QUERY_NODES_NUM&start=$START&q=DOC_TYPE:ErrorNode&wt=json$APPEND_SHARD")
+        response=$(curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' "$SOLRURL/$SHARD/afts?indent=on&rows=$BATCH_ERROR_NODES_NUM&start=$START&q=DOC_TYPE:%27ErrorNode%27&wt=json$APPEND_SHARD")
     } ||
     {
         errorMsg "Cannot communicate with SOLR on $SOLRURL/$SHARD. Request: \n \
-            curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' \"$SOLRURL/$SHARD/select?q=DOC_TYPE:%22ErrorNode%22&wt=json&rows=$BATCH_QUERY_NODES_NUM&start=$START$APPEND_SHARD\"
+            curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' \"$SOLRURL/$SHARD/afts?q=DOC_TYPE:%22ErrorNode%22&wt=json&rows=$BATCH_ERROR_NODES_NUM&start=$START$APPEND_SHARD\"
         "
         exit 1
     }
@@ -256,6 +249,7 @@ crossCheckPathNodes()
     echo "Cross checking indexed nodes with existing nodes in database for the given path..."
 
     touch $BASEFOLDER/purge-nodes
+    clearFile $BASEFOLDER/purge-nodes
 
     sort $BASEFOLDER/indexed-nodes | uniq > $BASEFOLDER/indexed-nodes_temp && mv $BASEFOLDER/indexed-nodes_temp $BASEFOLDER/indexed-nodes
     sort $BASEFOLDER/nodes | uniq > $BASEFOLDER/nodes_temp && mv $BASEFOLDER/nodes_temp $BASEFOLDER/nodes
@@ -282,16 +276,57 @@ prepStandaloneErrorCheck()
     clearFile $BASEFOLDER/missing-nodes
 }
 
+parallelFix()
+{
+    touch $BASEFOLDER/parallel-fix.log
+    clearFile $BASEFOLDER/parallel-fix.log
+
+    if [ -n "$SHARDLIST" ] && [ -n "$SOLR_INSTANCE_LIST" ]; then
+        echo "Will reindex all missing items in the shards: $SOLR_INSTANCE_LIST"
+        IFS=',' read -ra SHARDHOSTLIST <<< "$SOLR_INSTANCE_LIST"
+    else
+        SHARDHOSTLIST=("$SOLRURL")
+    fi
+
+    for SHARDINSTANCE in "${SHARDHOSTLIST[@]}"
+    do
+        echo "Background Schedule reindex in instance: $SHARDINSTANCE"
+        fix "$SHARDINSTANCE" > $BASEFOLDER/parallel-fix.log 2>&1 &
+    done
+
+    echo "Waiting for all shards to finish reindexing... Logs are being written to $BASEFOLDER/parallel-fix.log"
+}
+
 # Fixes the missing indexes by performing a reindex (based on the files created from --check)
 fix()
-{   
-    SECONDS=0
-    fixItem "nodes" "nodeid"
-    fixACLs
-    fixItem "txns" "txid"
-    fixItem "acltxids" "acltxid"
-    purgeNodes
-    sucessMsg "Elapsed Time requesting reindex: $SECONDS seconds"
+{
+    if [ "$REINDEX_RELATED_TXNS" == "true" ]; then
+        addRelatedItems
+    fi
+
+    SHARD_PARAM=$1
+
+    if [ -n "$SHARDLIST" ] && [ -n "$SOLR_INSTANCE_LIST" ]; then
+        echo "Shard list is defined. Will reindex all missing items in the shards: $SOLR_INSTANCE_LIST"
+        IFS=',' read -ra SHARDHOSTLIST <<< "$SOLR_INSTANCE_LIST"
+    elif [ -n "$SHARD_PARAM" ]; then
+        SHARDHOSTLIST=("$SHARD_PARAM")
+    else
+        SHARDHOSTLIST=("$SOLRURL")
+    fi
+
+    
+    for SHARDINSTANCE in "${SHARDHOSTLIST[@]}"
+    do
+        echo "Starting Schedule reindex in instance: $SHARDINSTANCE"
+        SECONDS=0
+        fixItem "nodes" "nodeid" "$SHARDINSTANCE"
+        fixACLs "$SHARDINSTANCE"
+        fixItem "txns" "txid" "$SHARDINSTANCE"
+        fixItem "acltxids" "acltxid" "$SHARDINSTANCE"
+        purgeNodes "$SHARDINSTANCE"
+        sucessMsg "Elapsed Time requesting reindex in instance $SHARDINSTANCE: $SECONDS seconds"
+    done
 }
 
 # Gather nodes from postgres database
@@ -649,6 +684,7 @@ fixItem()
 {
     item=$1 
     reindex_param_name=$2 
+    shard_instance_url=$3
 
     if [[ ! -f $BASEFOLDER/missing-$item ]]; then
         echo "Skipping reindex for $item"
@@ -661,7 +697,7 @@ fixItem()
     echo "Missing $item in index: $(cat $BASEFOLDER/missing-$item | wc -l)"
     while IFS=, read -r itemValue
     do
-        sucess=$(reindexItem "$reindex_param_name=$itemValue")
+        sucess=$(reindexItem "$reindex_param_name=$itemValue" "$shard_instance_url")
         count=$((count+1))
         case $sucess in
             1)
@@ -680,18 +716,18 @@ fixItem()
 # Aux function to purge nodes from the index
 purgeNodes()
 {
-
     if [[ ! -f $BASEFOLDER/purge-nodes ]]; then
         return
     fi
 
+    shard_instance_url=$1
     TOTAL_ITEMS=$(cat $BASEFOLDER/purge-nodes | wc -l )
 
     count=0
     echo "Nodes to be purged from index: $TOTAL_ITEMS"
     while IFS=, read -r itemValue
     do
-        sucess=$(purgeItem "nodeid=$itemValue")
+        sucess=$(purgeItem "nodeid=$itemValue" "$shard_instance_url")
         count=$((count+1))
         case $sucess in
             1)
@@ -715,13 +751,15 @@ fixACLs()
         return
     fi
 
+    shard_instance_url=$1
+
     TOTAL_ITEMS=$(cat $BASEFOLDER/missing-$item | wc -l )
 
     count=0
     echo "Missing acls in index: $(cat $BASEFOLDER/missing-acls | wc -l)"
     while IFS=, read -r aclid txid acltxid
     do
-        sucess=$(reindexItem "acltxid=$acltxid&txid=$txid")
+        sucess=$(reindexItem "acltxid=$acltxid&txid=$txid" "$shard_instance_url")
         count=$((count+1))
         case $sucess in
             1)
@@ -742,9 +780,10 @@ reindexItem()
 {
     touch $BASEFOLDER/error.log.tmp
     reindex_params=$1
+    shard_instance_url=$2
     status=0
     {
-        response=$(curl -s $SOLRHEADERS $SSL_CONFIG "$SOLRURL/admin/cores?action=reindex&$reindex_params" -o $BASEFOLDER/error.log.tmp -w "%{http_code}")
+        response=$(curl -s $SOLRHEADERS $SSL_CONFIG "$shard_instance_url/admin/cores?action=reindex&$reindex_params" -o $BASEFOLDER/error.log.tmp -w "%{http_code}")
     } ||
     {
         status=1
@@ -762,9 +801,10 @@ purgeItem()
 {
     touch $BASEFOLDER/error.log.tmp
     purge_params=$1
+    shard_instance_url=$2
     status=0
     {
-        response=$(curl -s $SOLRHEADERS $SSL_CONFIG "$SOLRURL/admin/cores?action=purge&$purge_params" -o $BASEFOLDER/error.log.tmp -w "%{http_code}")
+        response=$(curl -s $SOLRHEADERS $SSL_CONFIG "$shard_instance_url/admin/cores?action=purge&$purge_params" -o $BASEFOLDER/error.log.tmp -w "%{http_code}")
     } ||
     {
         status=1
@@ -775,6 +815,26 @@ purgeItem()
         status=2
     fi
     echo $status
+}
+
+addRelatedItems()
+{
+    echo "Adding related transactions to the reindex list"
+    grep -Ff $BASEFOLDER/missing-nodes $CSV_FILE | while read -r line; do
+        addToMissing "$line" 3 $BASEFOLDER/missing-txns
+    done
+}
+
+addToMissing() {
+    record=$1
+    column_number=$2
+    target_file=$3
+
+    value=$(echo "$record" | awk -v col="$column_number" -F, '{print $col}')
+
+    if ! grep -q "^$value$" "$target_file"; then
+        echo "$value" >> "$target_file"
+    fi
 }
 
 errorMsg()
@@ -838,7 +898,7 @@ while [ -n "$1" ]; do
         --check|-c)
             RUN_CHECK=1
             ;;
-        --check-errors-only)
+        --check-errors)
             RUN_ERROR_CHECK=1
             ;;
         --csv)
@@ -891,20 +951,21 @@ if [ "$RUN_CHECK" -eq 1 ]; then
     check $CSV_FILE_ARG
 fi
 
-if [ "$RUN_ERROR_CHECK" -eq 1 ]; then
+if [ "$RUN_ERROR_CHECK" -eq 1 ] && [ "$RUN_CHECK" = 0 ]; then
     prepStandaloneErrorCheck
     checkErrorNodes
     crossCheckErrorNodes
 fi
 
-if [ "$RUN_QUERY" -eq 1 ] && [ "$RUN_CHECK" = 0 ] && [ "$RUN_FIX" = 1 ]; then 
-    check $CSV_FILE_ARG
-    fix
+if [ "$RUN_FIX" -eq 1 ]; then
+    if [ "$PARALLEL_FIX" == "true" ]; then
+        parallelFix
+    else
+        fix
+    fi
 fi
 
-if [ "$RUN_FIX" -eq 1 ]; then
-    fix
-fi
+
 
 if [ "$RUN_QUERY" -eq 0 ] && [ "$RUN_CHECK" = 0 ] && [ "$RUN_FIX" = 0 ] && [ "$RUN_ERROR_CHECK" = 0 ]; then
     displayHelp

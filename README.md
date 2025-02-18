@@ -56,7 +56,9 @@ Only uncomment/include these configs if you have sharding
 | Variable | Example | Description |
 | ----------- | ----------- | ----------- |
 | SHARD | SHARD=shard-0 | Set SHARD as any one of the shards that lives in SOLRURL (doesn't impact the results which one you choose)|
-| SHARDLIST | SHARDLIST="<http://solr6:8983/solr/shard-0,http://solr6:8983/solr/shard-1,http://solr6:8983/solr/shard-2>" | A list of all shards we need to query|
+| SHARDLIST | SHARDLIST="<http://solr6:8983/solr/shard-0,http://solr6:8983/solr/shard-1,http://solr6:8983/solr/shard-2>" | A list of all shards we need to query - the URIs that SOLR is able to use to query the other shards/instances|
+| SOLR_INSTANCE_LIST | SHARDLIST="<http://localhost:8983/solr,http://localhost:8984/solr>" | A list of all instances we need to fix - the URIs that the script will call to fix|
+| PARALLEL_FIX | PARALLEL_FIX=true | Will issue the reindex to each instance in parallel, as a background process for each instance|
 
 ### Other configurations
 
@@ -66,6 +68,8 @@ Only uncomment/include these configs if you have sharding
 | DEFAULT_FROM_VALUE | DEFAULT_FROM_VALUE=0 | When no --from is provided, this is the default value we will query from|
 | DEFAULT_QUERY_STRATEGY | DEFAULT_QUERY_STRATEGY="node-id" | Default query strategy when no other is provided. Possible query strategies are: node-id (query by node DB ID), transaction-id (query by transaction ID) and transaction-committimems (query by the transaction commit time in milliseconds)|
 | CSV_FILE_NAME | CSV_FILE_NAME=output.csv | Default query strategy when no other is provided. Possible query strategies are: node-id (query by node DB ID), transaction-id (query by transaction ID) and transaction-committimems (query by the transaction commit time in milliseconds)|
+| REINDEX_RELATED_TXNS | REINDEX_RELATED=true | Option to also reindex the transactions related to the missing nodes|
+
 
 ## Usage
 
@@ -80,7 +84,7 @@ How to run:
 | --to or -t | final value to execute the query to - default is none|
 | --max or -m | limit the number of results - default no limit|
 | --check or -c | Will cross check the DB data from the default CSV or from the one provided as argument with the SOLR index. Outputs to screen the number of missing items in index and you can find the full list of missing items inside folder $BASEFOLDER. Will also do a check in SOLR for the error nodes and add them to the missing-nodes when not already there|
-| --check-errors-only | Will only gather the error nodes reported in SOLR. Does not need any prior actions and only requires a connection to SOLR. You can then (or simultaneosly)  use the --fix command to reindex these nodes|
+| --check-errors | Will gather the error nodes reported in SOLR. Can be used along with --check. Does not need any prior actions and only requires a connection to SOLR. You can then (or simultaneosly) use the --fix command to reindex these nodes|
 | --csv | Path to the CSV file you want to use to perform the cross check instead of using --query|
 | --fix | Reindexes the missing items. Requires that the check was ran previously and it relies on the files in $BASEFOLDER to request a reindex for each item|
 
