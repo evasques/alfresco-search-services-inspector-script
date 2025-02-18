@@ -10,6 +10,7 @@ SOLRURL=http://localhost:8083/solr
 SOLRSECRET=secret
 BATCH_REQUEST_NUM=100
 BATCH_ERROR_NODES_NUM=1000
+BATCH_CHILD_NODES_NUM=1000
 DEFAULT_FROM_VALUE=0
 DEFAULT_QUERY_STRATEGY="node-id"
 CSV_FILENAME=output.csv
@@ -32,12 +33,13 @@ How to run: \n \
     node-id : query by node DB ID  \n \
     transaction-id  : query by transaction ID  \n \
     transaction-committimems : query by the transaction commit time in milliseconds  \n \
- --from | -f : inital value to execute the query from - default is 0 \n \
+    ancestor-id : query by the tree starting at an ancestor folder node-id. Only supports --from (the node id of the ancestor node), does not support --to  \n \
+ --from | -f : inital value to execute the query from - default is 0. When strategy used is "ancestor-id", node id and node uuid need to be submitted  \n \
  --to | -t : final value to execute the query to - default is none \n \
  --max | -m : limit the number of results - default no limit \n \
  --check | -c : Will cross check the DB data from the default CSV or from the one provided as argument with the SOLR index \n \
         Outputs to screen the number of missing items in index and you can find the full list of missing items inside folder $BASEFOLDER \n \
- --check-errors-only : Will only gather the error nodes reported in SOLR. Does not need any prior actions and only requires \n \
+ --check-errors : Will only gather the error nodes reported in SOLR. Does not need any prior actions and only requires \n \
         a connection to SOLR. You can then (or simultaneosly)  use the --fix command to reindex these nodes \n \
  --csv : Path to the CSV file you want to use to perform the cross check instead of using --query \n \
  --fix : Reindexes the missing items. Requires that the check was ran previously and it relies on the files in $BASEFOLDER to request a reindex for each item \n\n \
@@ -118,11 +120,15 @@ check()
     checkItem "txns" "TXID" "Tx" "&fl=[cached]*"
     checkItem "acltxids" "ACLTXID" "AclTx" "&fl=[cached]*"
 
+    if [ "$QUERY_STRATEGY" == "ANCESTOR-ID" ]; then
+        checkPathNodes
+        crossCheckPathNodes
+    fi
+
     if [ "$RUN_ERROR_CHECK" -eq 1 ]; then
         checkErrorNodes
         crossCheckErrorNodes
     fi
-
     sucessMsg 'Elapsed Time performing index check:' $SECONDS 'seconds'
     sucessMsg "You can validate the missing items in $BASEFOLDER folder in the files named missing-%"
 }
@@ -152,9 +158,54 @@ checkErrorNodes()
     done
     echo " - Total Error Nodes in index: $COUNT_ERROR_NODES"
 }
+
+# Queries SOLR for the all nodes in a path and exports them to a file
+checkPathNodes()
+{
+    if [ -n "$NODE_UUID" ]; then
+        ANCESTOR_NODE=$NODE_UUID
+        echo "SOLR indexed nodes check for children of workspace://SpacesStore/$ANCESTOR_NODE"
+    else
+        errorMsg "Ancestor node is required for path check. Please provide a valid node uuid. Example: --from 2343 d588b47d-6713-415e-9822-297eee9a6849"
+        exit 1
+    fi
+
+    ANCESTOR_NODES_FILE=$BASEFOLDER/indexed-nodes
+
+    clearFile $ANCESTOR_NODES_FILE
+
+    COUNT_CHILDREN_NODES=0
+    FOUND_CHILDREN_NODES=0
+    START_ROWS=0
+
+    while true
+    do
+        response=$(batchRequestPathNodes $ANCESTOR_NODE $START_ROWS)
+
+        validateResponse "$response"
+
+        FOUND_CHILDREN_NODES=$(echo $response | jq '.response.numFound' )
+        REQ_CHILDREN_NODES=$(echo $response | jq -r '.response.docs | length' )
+        COUNT_CHILDREN_NODES=$((COUNT_CHILDREN_NODES+REQ_CHILDREN_NODES))
+
+        echo $response | jq -r '.response.docs[] | (.DBID|tostring)' >> $ANCESTOR_NODES_FILE
+
+        if [ "$COUNT_CHILDREN_NODES" -ge "$FOUND_CHILDREN_NODES" ]; then
+            break
+        fi
+
+        reportProgress $COUNT_CHILDREN_NODES $FOUND_CHILDREN_NODES "indexed nodes"
+
+        START_ROWS=$((START_ROWS+BATCH_CHILD_NODES_NUM))
+    done
+
+    echo " - Total Indexed Nodes in path: $COUNT_CHILDREN_NODES"
+}
+
 validateResponse()
 {
     test=$(echo "$1" | jq '.response' )
+
     if [ -z "$test" ]
     then
         errorMsg "Unexpected SOLR response: \n \
@@ -166,6 +217,7 @@ validateResponse()
 
 batchRequestErrorNodes()
 {
+    
     START=$1
     {
         response=$(curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' "$SOLRURL/$SHARD/afts?indent=on&rows=$BATCH_ERROR_NODES_NUM&start=$START&q=DOC_TYPE:%27ErrorNode%27&wt=json$APPEND_SHARD")
@@ -178,6 +230,40 @@ batchRequestErrorNodes()
     }
 
     echo $response
+}
+
+batchRequestPathNodes()
+{
+    ANCESTOR_NODE=$1
+    START=$2
+    {
+        response=$(curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' "$SOLRURL/$SHARD/afts?indent=on&rows=$BATCH_CHILD_NODES_NUM&start=$START&q=ANCESTOR:%27workspace://SpacesStore/$ANCESTOR_NODE%27&wt=json$APPEND_SHARD")
+    } ||
+    {
+        errorMsg "Cannot communicate with SOLR on $SOLRURL/$SHARD. Request: \n \
+            curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' \"$SOLRURL/$SHARD/afts?indent=on&rows=$BATCH_CHILD_NODES_NUM&start=$START&q=ANCESTOR:%27workspace://SpacesStore/$ANCESTOR_NODE%27&wt=json$APPEND_SHARD\"
+        "
+        exit 1
+    }
+
+    echo $response
+}
+
+crossCheckPathNodes()
+{
+    echo "Cross checking indexed nodes with existing nodes in database for the given path..."
+
+    touch $BASEFOLDER/purge-nodes
+    clearFile $BASEFOLDER/purge-nodes
+
+    sort $BASEFOLDER/indexed-nodes | uniq > $BASEFOLDER/indexed-nodes_temp && mv $BASEFOLDER/indexed-nodes_temp $BASEFOLDER/indexed-nodes
+    sort $BASEFOLDER/nodes | uniq > $BASEFOLDER/nodes_temp && mv $BASEFOLDER/nodes_temp $BASEFOLDER/nodes
+
+    grep -xvFf $BASEFOLDER/nodes $BASEFOLDER/indexed-nodes | while read -r node; do
+        echo $node >> $BASEFOLDER/purge-nodes
+    done
+    total_nodes_to_purge=$(cat $BASEFOLDER/purge-nodes | wc -l)
+    echo " - Total nodes that need to be purged: $total_nodes_to_purge"
 }
 
 crossCheckErrorNodes()
@@ -243,6 +329,7 @@ fix()
         fixACLs "$SHARDINSTANCE"
         fixItem "txns" "txid" "$SHARDINSTANCE"
         fixItem "acltxids" "acltxid" "$SHARDINSTANCE"
+        purgeNodes "$SHARDINSTANCE"
         sucessMsg "Elapsed Time requesting reindex in instance $SHARDINSTANCE: $SECONDS seconds"
     done
 }
@@ -325,7 +412,9 @@ setupQuery()
     boolean_value=$1
 
     if ! [[ $FROM_VALUE =~ $INT_REGEX ]] ; then
-        FROM_VALUE=$DEFAULT_FROM_VALUE
+        if [ "$QUERY_STRATEGY" != "ANCESTOR-ID" ]; then
+            FROM_VALUE=$DEFAULT_FROM_VALUE
+        fi
     fi
 
     if ! [[ $TO_VALUE =~ $INT_REGEX ]] ; then
@@ -397,11 +486,30 @@ and p.node_id is null \
 order by n.id \
 $APPEND_LIMIT;"
 
+    elif [ "$QUERY_STRATEGY" = "ANCESTOR-ID" ]; then
+
+echo "WITH RECURSIVE tree AS ( \
+SELECT child_node_id, child_node_name FROM alf_child_assoc \
+WHERE parent_node_id='$FROM_VALUE' and is_primary=true \
+UNION ALL
+SELECT alf_child_assoc.child_node_id, alf_child_assoc.child_node_name FROM alf_child_assoc, tree
+WHERE alf_child_assoc.parent_node_id = tree.child_node_id and is_primary = true
+)
+SELECT n.id, n.acl_id, transaction_id, acl_change_set
+FROM tree
+inner join alf_node n on (n.id=child_node_id)
+inner join alf_access_control_list acl on (acl.id=n.acl_id)
+inner join alf_store s on (n.store_id=s.id and s.protocol='workspace' and s.identifier='SpacesStore')
+left join alf_node_properties p on (p.node_id=n.id and p.qname_id in (select id from alf_qname where local_name='isIndexed') and p.boolean_value=false)
+where p.node_id is null \
+$APPEND_LIMIT;"
+
     else
         echo -e "Query strategy is not valid. Supported values are: \n \
         - node-id : sequencial node id \n \
         - transaction-id: Sequencial transaction id \n \
-        - transaction-committimems : Transaction commit time \n"
+        - transaction-committimems : Transaction commit time \n \
+        - ancestor-id : tree of an acestor node id \n"
         exit 1;
     fi
 }
@@ -415,6 +523,7 @@ prep()
     clearFile $BASEFOLDER/aclunique
     clearFile $BASEFOLDER/txns
     clearFile $BASEFOLDER/acltxids
+    clearFile $BASEFOLDER/dataset
     
     # nodes - Only 1st column
     cat $CSV_FILE | cut -f1,1 -d',' > $BASEFOLDER/nodes
@@ -434,6 +543,10 @@ prep()
     # changesets - 4th column, remove duplicates
     cat $CSV_FILE | cut -f4,4 -d',' > $BASEFOLDER/acltxids
     sort $BASEFOLDER/acltxids | uniq > $BASEFOLDER/acltxids_temp && mv $BASEFOLDER/acltxids_temp $BASEFOLDER/acltxids
+
+    # Sort CSV File
+    sort $CSV_FILE | uniq > $BASEFOLDER/dataset
+
 
     echo "Statistics: "
     echo " - Total nodes: $(cat $BASEFOLDER/nodes | wc -l)"
@@ -605,6 +718,36 @@ fixItem()
     echo " - $item scheduled to be reindexed: $count"
 }
 
+# Aux function to purge nodes from the index
+purgeNodes()
+{
+    if [[ ! -f $BASEFOLDER/purge-nodes ]]; then
+        return
+    fi
+
+    shard_instance_url=$1
+    TOTAL_ITEMS=$(cat $BASEFOLDER/purge-nodes | wc -l )
+
+    count=0
+    echo "Nodes to be purged from index: $TOTAL_ITEMS"
+    while IFS=, read -r itemValue
+    do
+        sucess=$(purgeItem "nodeid=$itemValue" "$shard_instance_url")
+        count=$((count+1))
+        case $sucess in
+            1)
+                errorMsg "Cannot communicate with SOLR on $SOLRURL/$SHARD."
+                exit 1;
+                ;;
+            2)
+                errorMsg "An error occured trying to purge node with id $itemValue. See log file for more info: $BASEFOLDER/error.log"
+                ;;
+        esac
+        reportProgress $count $TOTAL_ITEMS $item
+    done < $BASEFOLDER/purge-nodes
+    echo " - Nodes scheduled to be be purged: $count"
+}
+
 # Aux function. Reindex acls that are on file $BASEFOLDER/missing-acls
 fixACLs()
 {
@@ -637,7 +780,7 @@ fixACLs()
     echo " - acls scheduled to be reindexed: $count"
 }
 
-#Auth function to calls SOLR and handles errors
+#Auth function that calls SOLR to reindex
 reindexItem()
 {
     touch $BASEFOLDER/error.log.tmp
@@ -646,6 +789,27 @@ reindexItem()
     status=0
     {
         response=$(curl -s $SOLRHEADERS $SSL_CONFIG "$shard_instance_url/admin/cores?action=reindex&$reindex_params" -o $BASEFOLDER/error.log.tmp -w "%{http_code}")
+    } ||
+    {
+        status=1
+    }
+    if [ "$response" -ne 200 ] && [ "$status" -eq 0 ]; then
+        cat $BASEFOLDER/error.log.tmp >> $BASEFOLDER/error.log
+        rm $BASEFOLDER/error.log.tmp
+        status=2
+    fi
+    echo $status
+}
+
+#Auth function that calls SOLR to purge
+purgeItem()
+{
+    touch $BASEFOLDER/error.log.tmp
+    purge_params=$1
+    shard_instance_url=$2
+    status=0
+    {
+        response=$(curl -s $SOLRHEADERS $SSL_CONFIG "$shard_instance_url/admin/cores?action=purge&$purge_params" -o $BASEFOLDER/error.log.tmp -w "%{http_code}")
     } ||
     {
         status=1
@@ -710,6 +874,7 @@ TO_VALUE=
 MAX_VALUES=
 QUERY_STRATEGY=
 DEFAULT_CONFIG_FILE=".config"
+NODE_UUID=
 
 while [ -n "$1" ]; do
     case "$1" in
@@ -727,6 +892,7 @@ while [ -n "$1" ]; do
         --from|-f)
             shift
             FROM_VALUE=$1
+            NODE_UUID=$2
             ;;
         --to|-t)
             shift
