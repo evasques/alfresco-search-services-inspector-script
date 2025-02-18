@@ -80,7 +80,7 @@ How to run:
 | --config | path to the configuration file with all the environment settings. By default it uses .config file. If not present, it uses the values configured in the script|
 | --query or -q | export the data directly from the postgres database. Will output a CSV|
 | --strategy or -s | strategy for obtaining the data. Possible values are node-id (query by node DB ID), transaction-id (query by transaction ID) or transaction-committimems (query by the transaction commit time in milliseconds)|
-| --from or -f |  inital value to execute the query from - default is $DEFAULT_FROM_VALUE|
+| --from or -f |  inital value to execute the query from - default is $DEFAULT_FROM_VALUE. When strategy used is "ancestor-id", node id and node uuid of the parent node need to be submitted.|
 | --to or -t | final value to execute the query to - default is none|
 | --max or -m | limit the number of results - default no limit|
 | --check or -c | Will cross check the DB data from the default CSV or from the one provided as argument with the SOLR index. Outputs to screen the number of missing items in index and you can find the full list of missing items inside folder $BASEFOLDER. Will also do a check in SOLR for the error nodes and add them to the missing-nodes when not already there|
@@ -124,6 +124,12 @@ Combines the multiple operations:
 
 ```bash
 sh checkIndex.sh --query --strategy transaction-id --from 100000 --to 200000 --max 5000 --check --fix
+```
+
+Check and fix by path:
+
+```bash
+sh checkIndex.sh --query --strategy ancestor-id --from 36592625434 61230f5a-389f-440e-a7c5-219ee4bb94c3 --check --fix
 ```
 
 ## External CSV File (optional)

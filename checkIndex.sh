@@ -33,7 +33,7 @@ How to run: \n \
     transaction-id  : query by transaction ID  \n \
     transaction-committimems : query by the transaction commit time in milliseconds  \n \
     ancestor-id : query by the tree starting at an ancestor folder node-id. Only supports --from (the node id of the ancestor node), does not support --to  \n \
- --from | -f : inital value to execute the query from - default is 0 \n \
+ --from | -f : inital value to execute the query from - default is 0. When strategy used is "ancestor-id", node id and node uuid need to be submitted  \n \
  --to | -t : final value to execute the query to - default is none \n \
  --max | -m : limit the number of results - default no limit \n \
  --check | -c : Will cross check the DB data from the default CSV or from the one provided as argument with the SOLR index \n \
@@ -161,9 +161,13 @@ checkErrorNodes()
 # Queries SOLR for the all nodes in a path and exports them to a file
 checkPathNodes()
 {
-    ANCESTOR_NODE=$FROM_VALUE
-
-    echo "SOLR indexed nodes check for children of workspace://SpacesStore/$ANCESTOR_NODE"
+    if [ -n "$NODE_UUID" ]; then
+        ANCESTOR_NODE=$NODE_UUID
+        echo "SOLR indexed nodes check for children of workspace://SpacesStore/$ANCESTOR_NODE"
+    else
+        errorMsg "Ancestor node is required for path check. Please provide a valid node uuid. Example: --from 2343 d588b47d-6713-415e-9822-297eee9a6849"
+        exit 1
+    fi
 
     ANCESTOR_NODES_FILE=$BASEFOLDER/indexed-nodes
 
@@ -484,8 +488,8 @@ $APPEND_LIMIT;"
     elif [ "$QUERY_STRATEGY" = "ANCESTOR-ID" ]; then
 
 echo "WITH RECURSIVE tree AS ( \
-SELECT child_node_id, child_node_name FROM alf_child_assoc INNER JOIN alf_node n on (n.id=parent_node_id) \
-WHERE n.uuid='$FROM_VALUE' and is_primary=true \
+SELECT child_node_id, child_node_name FROM alf_child_assoc \
+WHERE parent_node_id='$FROM_VALUE' and is_primary=true \
 UNION ALL
 SELECT alf_child_assoc.child_node_id, alf_child_assoc.child_node_name FROM alf_child_assoc, tree
 WHERE alf_child_assoc.parent_node_id = tree.child_node_id and is_primary = true
@@ -869,6 +873,7 @@ TO_VALUE=
 MAX_VALUES=
 QUERY_STRATEGY=
 DEFAULT_CONFIG_FILE=".config"
+NODE_UUID=
 
 while [ -n "$1" ]; do
     case "$1" in
@@ -886,6 +891,7 @@ while [ -n "$1" ]; do
         --from|-f)
             shift
             FROM_VALUE=$1
+            NODE_UUID=$2
             ;;
         --to|-t)
             shift
