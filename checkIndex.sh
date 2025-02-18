@@ -9,7 +9,8 @@ DBPORT=5432
 SOLRURL=http://localhost:8083/solr
 SOLRSECRET=secret
 BATCH_REQUEST_NUM=100
-BATCH_QUERY_NODES_NUM=1000
+BATCH_ERROR_NODES_NUM=1000
+BATCH_CHILD_NODES_NUM=1000
 DEFAULT_FROM_VALUE=0
 DEFAULT_QUERY_STRATEGY="node-id"
 CSV_FILENAME=output.csv
@@ -195,7 +196,7 @@ checkPathNodes()
 
         reportProgress $COUNT_CHILDREN_NODES $FOUND_CHILDREN_NODES "indexed nodes"
 
-        START_ROWS=$((START_ROWS+BATCH_QUERY_NODES_NUM))
+        START_ROWS=$((START_ROWS+BATCH_CHILD_NODES_NUM))
     done
 
     echo " - Total Indexed Nodes in path: $COUNT_CHILDREN_NODES"
@@ -236,11 +237,11 @@ batchRequestPathNodes()
     ANCESTOR_NODE=$1
     START=$2
     {
-        response=$(curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' "$SOLRURL/$SHARD/afts?indent=on&rows=$BATCH_QUERY_NODES_NUM&start=$START&q=ANCESTOR:%27workspace://SpacesStore/$ANCESTOR_NODE%27&wt=json$APPEND_SHARD")
+        response=$(curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' "$SOLRURL/$SHARD/afts?indent=on&rows=$BATCH_CHILD_NODES_NUM&start=$START&q=ANCESTOR:%27workspace://SpacesStore/$ANCESTOR_NODE%27&wt=json$APPEND_SHARD")
     } ||
     {
         errorMsg "Cannot communicate with SOLR on $SOLRURL/$SHARD. Request: \n \
-            curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' \"$SOLRURL/$SHARD/afts?indent=on&rows=$BATCH_QUERY_NODES_NUM&start=$START&q=ANCESTOR:%27workspace://SpacesStore/$ANCESTOR_NODE%27&wt=json$APPEND_SHARD\"
+            curl -g -s $SOLRHEADERS $SSL_CONFIG -H 'Content-Type: application/json' \"$SOLRURL/$SHARD/afts?indent=on&rows=$BATCH_CHILD_NODES_NUM&start=$START&q=ANCESTOR:%27workspace://SpacesStore/$ANCESTOR_NODE%27&wt=json$APPEND_SHARD\"
         "
         exit 1
     }
