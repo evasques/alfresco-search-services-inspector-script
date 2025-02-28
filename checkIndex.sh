@@ -347,11 +347,11 @@ queryPg()
     query=$(setupQuery false)
     
     {
-        psql postgresql://$DBUSER:$DBPASS@$DBHOST:$DBPORT -t -A -F"," -c "$query" > $CSV_FILE
+        psql postgresql://$DBUSER:$DBPASS@$DBHOST:$DBPORT/$DBNAME -t -A -F"," -c "$query" > $CSV_FILE
     } ||
     {
         errorMsg "Error occurred when trying to query the database. Command: \n \
-            psql postgresql://$DBUSER:$DBPASS@$DBHOST:$DBPORT -t -A -F\",\" -c \"$query\" > $CSV_FILE
+            psql postgresql://$DBUSER:$DBPASS@$DBHOST:$DBPORT/$DBNAME -t -A -F\",\" -c \"$query\" > $CSV_FILE
         "
         exit 1;
     }
